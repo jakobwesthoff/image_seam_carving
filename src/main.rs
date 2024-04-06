@@ -1,12 +1,20 @@
 use anyhow::Context;
 
 type Pixel = (f64, f64, f64, f64);
-struct Matrix<T> {
+
+#[derive(Clone)]
+struct Matrix<T>
+where
+    T: Clone,
+{
     width: u32,
     height: u32,
     data: Vec<T>,
 }
-impl<T> Matrix<T> {
+impl<T> Matrix<T>
+where
+    T: Clone,
+{
     fn set(&mut self, y: usize, x: usize, value: T) {
         self.data[y * self.width as usize + x] = value;
     }
@@ -23,7 +31,7 @@ impl Matrix<Pixel> {
             self.height,
             self.data
                 .iter()
-                .flat_map(|(r, b, g, a)| {
+                .flat_map(|(r, g, b, a)| {
                     vec![
                         (r * 255.0).round().clamp(0.0, 255.0) as u8,
                         (g * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -113,6 +121,7 @@ type ImageMatrix = Matrix<Pixel>;
 type LuminanceMatrix = Matrix<f64>;
 type GradientMatrix = Matrix<f64>;
 type DpMatrix = Matrix<f64>;
+type Seam = Vec<u32>;
 
 fn load_image(path: &str) -> anyhow::Result<ImageMatrix> {
     let image = image::open(path).context("load image")?;
@@ -226,7 +235,6 @@ fn calculate_dp(gradient: &GradientMatrix) -> DpMatrix {
                 }
                 min_energy_on_path = min_energy_on_path.min(*dp.get(y as usize - 1, x as usize));
             }
-            // println!("y: {}, x: {}, energy: {}", y, cx, min_energy_on_path);
             dp.set(
                 y as usize,
                 cx as usize,
@@ -238,6 +246,42 @@ fn calculate_dp(gradient: &GradientMatrix) -> DpMatrix {
     dp
 }
 
+fn calculate_seam(dp: &DpMatrix) -> Seam {
+    // Find minimum energy path start point
+    let mut min_x = f64::MAX;
+    let mut min_x_index = 0;
+    for x in 0..dp.width {
+        let candidate_min_x = dp.get(dp.height as usize - 1, x as usize);
+        if *candidate_min_x < min_x {
+            min_x_index = x;
+            min_x = *candidate_min_x;
+        }
+    }
+
+    let mut seam = vec![0; dp.height as usize];
+    seam[dp.height as usize - 1] = min_x_index;
+
+    for y in (0..=dp.height -2).rev() {
+        min_x = f64::MAX;
+        let mut next_min_x_index = min_x_index;
+        for dx in -1..=1 as isize {
+            let x = min_x_index as isize + dx;
+            if x < 0 || x >= dp.width as isize {
+                continue;
+            }
+            let candidate_min_x = dp.get(y as usize, x as usize);
+            if *candidate_min_x < min_x {
+                next_min_x_index = x as u32;
+                min_x = *candidate_min_x;
+            }
+        }
+        min_x_index = next_min_x_index;
+        seam[y as usize] = min_x_index;
+    }
+
+    seam
+}
+
 fn main() -> anyhow::Result<()> {
     let image = load_image("./assets/Broadway_tower_edit.jpg")?;
 
@@ -246,8 +290,8 @@ fn main() -> anyhow::Result<()> {
     let luminance = calculate_luminance(&image);
     luminance.print_min_max("luminance");
     luminance
-    .save("./luminance.png")
-    .context("save luminance")?;
+        .save("./luminance.png")
+        .context("save luminance")?;
 
     // Apply sobel operator to get luminance gradient
     let gradient = calculate_gradient(&luminance);
@@ -260,6 +304,14 @@ fn main() -> anyhow::Result<()> {
     dp.print_min_max("dp");
     dp.save("dp.png")?;
 
+    let seam = calculate_seam(&dp);
+
+    let mut new_image = image.clone();
+    for y in 0..seam.len() {
+        new_image.set(y, seam[y] as usize, (255.0, 255.0, 0.0, 255.0));
+    }
+
+    new_image.save("./seam.png")?;
 
     Ok(())
 }
