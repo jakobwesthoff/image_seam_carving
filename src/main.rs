@@ -63,12 +63,24 @@ impl Matrix<f64> {
     }
 
     fn normalize(&self) -> Self {
+        let min = self.min();
         let max = self.max();
         Self {
             width: self.width,
             height: self.height,
-            data: self.data.iter().map(|value| value / max).collect(),
+            data: self
+                .data
+                .iter()
+                .map(|value| (value - min) / (max - min))
+                .collect(),
         }
+    }
+
+    fn print_min_max(&self, name: &str) {
+        let min = self.min();
+        let max = self.max();
+
+        println!("Matrix {} -> min: {}, max: {}", name, min, max);
     }
 
     fn save(&self, path: &str) -> anyhow::Result<()> {
@@ -100,6 +112,7 @@ impl Matrix<f64> {
 type ImageMatrix = Matrix<Pixel>;
 type LuminanceMatrix = Matrix<f64>;
 type GradientMatrix = Matrix<f64>;
+type DpMatrix = Matrix<f64>;
 
 fn load_image(path: &str) -> anyhow::Result<ImageMatrix> {
     let image = image::open(path).context("load image")?;
@@ -130,8 +143,8 @@ fn calculate_luminance(image: &ImageMatrix) -> LuminanceMatrix {
         data: image
             .data
             .iter()
-            // .map(|(r, g, b, _a)| 0.2126 * r + 0.7152 * g + 0.0722 * b)
-            .map(|(r, g, b, _a)| 0.299 * r + 0.587 * g + 0.114 * b)
+            .map(|(r, g, b, _a)| 0.2126 * r + 0.7152 * g + 0.0722 * b)
+            // .map(|(r, g, b, _a)| 0.299 * r + 0.587 * g + 0.114 * b)
             // .map(|(r, g, b, _a)| (0.299 * r.powi(2) + 0.587 * g.powi(2) + 0.114 * b.powi(2)).sqrt())
             .collect(),
     }
@@ -189,19 +202,64 @@ fn calculate_gradient(luminance: &LuminanceMatrix) -> GradientMatrix {
     gradient
 }
 
+fn calculate_dp(gradient: &GradientMatrix) -> DpMatrix {
+    let mut dp = DpMatrix {
+        width: gradient.width,
+        height: gradient.height,
+        data: vec![0.0; gradient.width as usize * gradient.height as usize],
+    };
+
+    // Start with the initial row as it is
+    for x in 0..gradient.width as usize {
+        dp.set(0, x, *gradient.get(0, x));
+    }
+
+    // Each next energy value is the value itself plus the minimum from the
+    // three pixels above it
+    for y in 1..gradient.height {
+        for cx in 0..gradient.width as isize {
+            let mut min_energy_on_path = f64::MAX;
+            for dx in -1..=1 {
+                let x = cx + dx;
+                if x < 0 || x >= gradient.width as isize {
+                    continue;
+                }
+                min_energy_on_path = min_energy_on_path.min(*dp.get(y as usize - 1, x as usize));
+            }
+            // println!("y: {}, x: {}, energy: {}", y, cx, min_energy_on_path);
+            dp.set(
+                y as usize,
+                cx as usize,
+                gradient.get(y as usize, cx as usize) + min_energy_on_path,
+            );
+        }
+    }
+
+    dp
+}
+
 fn main() -> anyhow::Result<()> {
     let image = load_image("./assets/Broadway_tower_edit.jpg")?;
 
     // Calculate luminance of the image
     // https://stackoverflow.com/a/596243
     let luminance = calculate_luminance(&image);
+    luminance.print_min_max("luminance");
     luminance
-        .save("./luminance.png")
-        .context("save luminance")?;
+    .save("./luminance.png")
+    .context("save luminance")?;
 
     // Apply sobel operator to get luminance gradient
     let gradient = calculate_gradient(&luminance);
+    gradient.print_min_max("gradient");
     gradient.save("./gradient.png").context("save gradient")?;
+
+    // Use Dynamic Programming to calculate the prerequisite to find the path
+    // with the lowest energy.
+    let dp = calculate_dp(&gradient);
+    dp.print_min_max("dp");
+    dp.save("dp.png")?;
+
 
     Ok(())
 }
