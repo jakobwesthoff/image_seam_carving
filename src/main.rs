@@ -49,6 +49,12 @@ where
             width: self.width as usize,
         }
     }
+
+    fn set_storage_size(&mut self, width: u32, height: u32, stride: u32) {
+        self.width = width;
+        self.height = height;
+        self.stride = stride;
+    }
 }
 
 struct StrideIterator<'a, T> {
@@ -162,13 +168,9 @@ impl Matrix<f64> {
     }
 }
 
-type ImageMatrix = Matrix<Pixel>;
-type LuminanceMatrix = Matrix<f64>;
-type GradientMatrix = Matrix<f64>;
-type DpMatrix = Matrix<f64>;
 type Seam = Vec<u32>;
 
-fn load_image(path: &str) -> anyhow::Result<ImageMatrix> {
+fn load_image(path: &str) -> anyhow::Result<Matrix<Pixel>> {
     let image = image::open(path).context("load image")?;
 
     Ok(Matrix::new(
@@ -191,24 +193,21 @@ fn load_image(path: &str) -> anyhow::Result<ImageMatrix> {
     ))
 }
 
-fn calculate_luminance(image: &ImageMatrix) -> LuminanceMatrix {
-    Matrix::new(
-        image.width,
-        image.height,
-        image.width,
-        image
-            .stride_iter()
-            .map(|(r, g, b, _)| 0.2126 * r + 0.7152 * g + 0.0722 * b)
-            // .map(|(r, g, b, _a)| 0.299 * r + 0.587 * g + 0.114 * b)
-            // .map(|(r, g, b, _a)| (0.299 * r.powi(2) + 0.587 * g.powi(2) + 0.114 * b.powi(2)).sqrt())
-            .collect(),
-    )
+fn calculate_luminance(luminance: &mut Matrix<f64>, image: &Matrix<Pixel>) {
+    luminance.set_storage_size(image.width, image.height, image.stride);
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let (r, g, b, _) = image.get(y as usize, x as usize);
+            // https://stackoverflow.com/a/596243
+            luminance.set(y as usize, x as usize, 0.2126 * r + 0.7152 * g + 0.0722 * b)
+        }
+    }
 }
 
 // https://en.wikipedia.org/wiki/Sobel_operator
 // Maybe checkout Prewitt Operator or Laplacian of Gaussian (LoG) as
 // alternatives to caluclate the gradient.
-fn calculate_gradient(luminance: &LuminanceMatrix) -> GradientMatrix {
+fn calculate_gradient(gradient: &mut Matrix<f64>, luminance: &Matrix<f64>) {
     #[rustfmt::skip]
     static G_X: [[f64; 3]; 3] = [
         [1.0, 0.0, -1.0],
@@ -223,12 +222,7 @@ fn calculate_gradient(luminance: &LuminanceMatrix) -> GradientMatrix {
         [-1.0, -2.0, -1.0]
     ];
 
-    let mut gradient = Matrix::new(
-        luminance.width,
-        luminance.height,
-        luminance.width,
-        vec![0.0; luminance.width as usize * luminance.height as usize],
-    );
+    gradient.set_storage_size(luminance.width, luminance.height, luminance.stride);
 
     for cy in 0..luminance.height as isize {
         for cx in 0..luminance.width as isize {
@@ -255,16 +249,10 @@ fn calculate_gradient(luminance: &LuminanceMatrix) -> GradientMatrix {
             gradient.set(cy as usize, cx as usize, (gx.powi(2) + gy.powi(2)).sqrt());
         }
     }
-    gradient
 }
 
-fn calculate_dp(gradient: &GradientMatrix) -> DpMatrix {
-    let mut dp = Matrix::new(
-        gradient.width,
-        gradient.height,
-        gradient.width,
-        vec![0.0; gradient.width as usize * gradient.height as usize],
-    );
+fn calculate_dp(dp: &mut Matrix<f64>, gradient: &Matrix<f64>) {
+    dp.set_storage_size(gradient.width, gradient.height, gradient.stride);
 
     // Start with the initial row as it is
     for x in 0..gradient.width as usize {
@@ -290,11 +278,9 @@ fn calculate_dp(gradient: &GradientMatrix) -> DpMatrix {
             );
         }
     }
-
-    dp
 }
 
-fn calculate_seam(dp: &DpMatrix) -> Seam {
+fn calculate_seam(dp: &Matrix<f64>) -> Seam {
     // Find minimum energy path start point
     let mut min_x = f64::MAX;
     let mut min_x_index = 0;
@@ -330,43 +316,62 @@ fn calculate_seam(dp: &DpMatrix) -> Seam {
     seam
 }
 
+struct SeamCarver {
+    image: Matrix<Pixel>,
+    luminance: Matrix<f64>,
+    gradient: Matrix<f64>,
+    dp: Matrix<f64>,
+}
+
+impl SeamCarver {
+    fn with_image(image_path: &str) -> anyhow::Result<Self> {
+        let image = load_image(image_path)?;
+        Ok(Self {
+            luminance: Matrix::new(
+                image.width,
+                image.height,
+                image.stride,
+                vec![0.0; image.width as usize * image.height as usize],
+            ),
+            gradient: Matrix::new(
+                image.width,
+                image.height,
+                image.stride,
+                vec![0.0; image.width as usize * image.height as usize],
+            ),
+            dp: Matrix::new(
+                image.width,
+                image.height,
+                image.stride,
+                vec![0.0; image.width as usize * image.height as usize],
+            ),
+            image,
+        })
+    }
+
+    fn carve_vertical(&mut self) {
+        calculate_luminance(&mut self.luminance, &self.image);
+        calculate_gradient(&mut self.gradient, &self.luminance);
+        calculate_dp(&mut self.dp, &self.gradient);
+        let seam = calculate_seam(&self.dp);
+        self.image.remove_seam(&seam);
+    }
+
+    fn save_image(&self, file_path: &str) -> anyhow::Result<()> {
+        self.image.save(file_path)?;
+        Ok(())
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    let mut image = load_image("./assets/Broadway_tower_edit.jpg")?;
+    let mut carver = SeamCarver::with_image("./assets/Broadway_tower_edit.jpg")?;
 
     for i in 0..510 {
         println!("Calculate and remove vertical seam: {}", i);
-        // Calculate luminance of the image
-        // https://stackoverflow.com/a/596243
-        let luminance = calculate_luminance(&image);
-        // luminance.print_min_max("luminance");
-        // luminance
-        //     .save("./luminance.png")
-        //     .context("save luminance")?;
-
-        // Apply sobel operator to get luminance gradient
-        let gradient = calculate_gradient(&luminance);
-        // gradient.print_min_max("gradient");
-        // gradient.save("./gradient.png").context("save gradient")?;
-
-        // Use Dynamic Programming to calculate the prerequisite to find the path
-        // with the lowest energy.
-        let dp = calculate_dp(&gradient);
-        // dp.print_min_max("dp");
-        // dp.save("dp.png")?;
-
-        let seam = calculate_seam(&dp);
-
-        // let mut new_image = image.clone();
-        // for y in 0..seam.len() {
-        //     new_image.set(y, seam[y] as usize, (255.0, 255.0, 0.0, 255.0));
-        // }
-
-        // new_image.save("./seam.png")?;
-
-        image.remove_seam(&seam);
+        carver.carve_vertical();
     }
 
-    image.save("./resized.png")?;
+    carver.save_image("./resized.png")?;
 
     Ok(())
 }
