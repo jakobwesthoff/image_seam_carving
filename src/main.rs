@@ -1,6 +1,6 @@
 use anyhow::Context;
 
-type Pixel = Option<(f64, f64, f64, f64)>;
+type Pixel = (f64, f64, f64, f64);
 
 #[derive(Clone)]
 struct Matrix<T>
@@ -9,18 +9,73 @@ where
 {
     width: u32,
     height: u32,
+    stride: u32,
     data: Vec<T>,
 }
 impl<T> Matrix<T>
 where
-    T: Clone,
+    T: Clone + Copy,
+    T: Default,
 {
+    fn new(width: u32, height: u32, stride: u32, data: Vec<T>) -> Self {
+        Self {
+            width,
+            height,
+            stride,
+            data,
+        }
+    }
+
     fn set(&mut self, y: usize, x: usize, value: T) {
-        self.data[y * self.width as usize + x] = value;
+        self.data[y * self.stride as usize + x] = value;
     }
 
     fn get(&self, y: usize, x: usize) -> &T {
-        &self.data[y * self.width as usize + x]
+        &self.data[y * self.stride as usize + x]
+    }
+
+    fn remove(&mut self, y: usize, x: usize) {
+        let i = y * self.stride as usize + x;
+        self.data
+            .copy_within(i + 1..((y * self.stride as usize) + self.width as usize), i);
+    }
+
+    fn stride_iter(&self) -> StrideIterator<'_, T> {
+        StrideIterator {
+            vec: self.data.as_slice(),
+            x: 0,
+            y: 0,
+            stride: self.stride as usize,
+            width: self.width as usize,
+        }
+    }
+}
+
+struct StrideIterator<'a, T> {
+    vec: &'a [T],
+    x: usize,
+    y: usize,
+    stride: usize,
+    width: usize,
+}
+
+impl<'a, T> Iterator for StrideIterator<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = self.y * self.stride + self.x;
+        if index >= self.vec.len() {
+            return None;
+        }
+
+        let value = self.vec.get(index).unwrap();
+
+        self.x += 1;
+        if self.x >= self.width {
+            self.x = 0;
+            self.y += 1;
+        }
+
+        Some(value)
     }
 }
 
@@ -29,11 +84,8 @@ impl Matrix<Pixel> {
         let image = image::RgbaImage::from_raw(
             self.width,
             self.height,
-            self.data
-                .iter()
-                .filter(|pixel| pixel.is_some())
-                .flat_map(|pixel| {
-                    let (r, g, b, a) = pixel.unwrap();
+            self.stride_iter()
+                .flat_map(|(r, g, b, a)| {
                     vec![
                         (r * 255.0).round().clamp(0.0, 255.0) as u8,
                         (g * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -51,23 +103,8 @@ impl Matrix<Pixel> {
     }
 
     fn remove_seam(&mut self, seam: &Seam) {
-        'iterate_rows: for y in 0..self.height {
-            // Find x by scanning the row, as we are storing the image with Optional values.
-            // This is not the most intelligent method and more or less a hack,
-            // but was the quickest and dirtiest way to make it work I could
-            // think of in the middle of the night :).
-            let mut index = 0;
-            let stride = self.data.len() / self.height as usize;
-            for x in 0..stride {
-                if self.data[y as usize * stride + x].is_some() {
-                    if index == seam[y as usize] {
-                        self.data[y as usize * stride + x as usize] = None;
-                        continue 'iterate_rows;
-                    } else {
-                        index += 1;
-                    }
-                }
-            }
+        for y in 0..self.height {
+            self.remove(y as usize, seam[y as usize] as usize);
         }
         self.width = self.width - 1;
     }
@@ -76,8 +113,7 @@ impl Matrix<Pixel> {
 impl Matrix<f64> {
     fn min(&self) -> f64 {
         let min = self
-            .data
-            .iter()
+            .stride_iter()
             .cloned()
             .reduce(|acc, value| acc.min(value))
             .unwrap();
@@ -86,26 +122,11 @@ impl Matrix<f64> {
 
     fn max(&self) -> f64 {
         let max = self
-            .data
-            .iter()
+            .stride_iter()
             .cloned()
             .reduce(|acc, value| acc.max(value))
             .unwrap();
         max
-    }
-
-    fn normalize(&self) -> Self {
-        let min = self.min();
-        let max = self.max();
-        Self {
-            width: self.width,
-            height: self.height,
-            data: self
-                .data
-                .iter()
-                .map(|value| (value - min) / (max - min))
-                .collect(),
-        }
     }
 
     fn print_min_max(&self, name: &str) {
@@ -116,13 +137,13 @@ impl Matrix<f64> {
     }
 
     fn save(&self, path: &str) -> anyhow::Result<()> {
-        let normalized_image = self.normalize();
+        let min = self.min();
+        let max = self.max();
         let image = image::RgbaImage::from_raw(
             self.width,
             self.height,
-            normalized_image
-                .data
-                .iter()
+            self.stride_iter()
+                .map(|value| (value - min) / (max - min)) // Normalize
                 .flat_map(|value| {
                     vec![
                         (value * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -150,41 +171,38 @@ type Seam = Vec<u32>;
 fn load_image(path: &str) -> anyhow::Result<ImageMatrix> {
     let image = image::open(path).context("load image")?;
 
-    Ok(Matrix {
-        width: image.width(),
-        height: image.height(),
-        data: image
+    Ok(Matrix::new(
+        image.width(),
+        image.height(),
+        image.width(),
+        image
             .to_rgba8()
             .into_vec()
             .chunks(4)
             .map(|pixel| {
-                Some((
+                (
                     pixel[0] as f64 / 255.0,
                     pixel[1] as f64 / 255.0,
                     pixel[2] as f64 / 255.0,
                     pixel[3] as f64 / 255.0,
-                ))
+                )
             })
             .collect(),
-    })
+    ))
 }
 
 fn calculate_luminance(image: &ImageMatrix) -> LuminanceMatrix {
-    Matrix {
-        width: image.width,
-        height: image.height,
-        data: image
-            .data
-            .iter()
-            .filter(|pixel| pixel.is_some())
-            .map(|pixel| {
-                let (r, g, b, _) = pixel.unwrap();
-                0.2126 * r + 0.7152 * g + 0.0722 * b
-            })
+    Matrix::new(
+        image.width,
+        image.height,
+        image.width,
+        image
+            .stride_iter()
+            .map(|(r, g, b, _)| 0.2126 * r + 0.7152 * g + 0.0722 * b)
             // .map(|(r, g, b, _a)| 0.299 * r + 0.587 * g + 0.114 * b)
             // .map(|(r, g, b, _a)| (0.299 * r.powi(2) + 0.587 * g.powi(2) + 0.114 * b.powi(2)).sqrt())
             .collect(),
-    }
+    )
 }
 
 // https://en.wikipedia.org/wiki/Sobel_operator
@@ -205,11 +223,12 @@ fn calculate_gradient(luminance: &LuminanceMatrix) -> GradientMatrix {
         [-1.0, -2.0, -1.0]
     ];
 
-    let mut gradient = GradientMatrix {
-        width: luminance.width,
-        height: luminance.height,
-        data: vec![0.0; luminance.width as usize * luminance.height as usize],
-    };
+    let mut gradient = Matrix::new(
+        luminance.width,
+        luminance.height,
+        luminance.width,
+        vec![0.0; luminance.width as usize * luminance.height as usize],
+    );
 
     for cy in 0..luminance.height as isize {
         for cx in 0..luminance.width as isize {
@@ -240,11 +259,12 @@ fn calculate_gradient(luminance: &LuminanceMatrix) -> GradientMatrix {
 }
 
 fn calculate_dp(gradient: &GradientMatrix) -> DpMatrix {
-    let mut dp = DpMatrix {
-        width: gradient.width,
-        height: gradient.height,
-        data: vec![0.0; gradient.width as usize * gradient.height as usize],
-    };
+    let mut dp = Matrix::new(
+        gradient.width,
+        gradient.height,
+        gradient.width,
+        vec![0.0; gradient.width as usize * gradient.height as usize],
+    );
 
     // Start with the initial row as it is
     for x in 0..gradient.width as usize {
