@@ -207,7 +207,11 @@ fn calculate_luminance(luminance: &mut Matrix<f64>, image: &Matrix<Pixel>) {
 // https://en.wikipedia.org/wiki/Sobel_operator
 // Maybe checkout Prewitt Operator or Laplacian of Gaussian (LoG) as
 // alternatives to caluclate the gradient.
-fn calculate_gradient(gradient: &mut Matrix<f64>, luminance: &Matrix<f64>) {
+fn calculate_gradient(
+    gradient: &mut Matrix<f64>,
+    luminance: &Matrix<f64>,
+    last_seam: Option<&Seam>,
+) {
     #[rustfmt::skip]
     static G_X: [[f64; 3]; 3] = [
         [1.0, 0.0, -1.0],
@@ -225,7 +229,15 @@ fn calculate_gradient(gradient: &mut Matrix<f64>, luminance: &Matrix<f64>) {
     gradient.set_storage_size(luminance.width, luminance.height, luminance.stride);
 
     for cy in 0..luminance.height as isize {
-        for cx in 0..luminance.width as isize {
+        // If a seem is provided only update the needed "corridor which changed due
+        // to removing this seam. Otherwise calculate everything.
+        let x_range = if let Some(last_seam) = last_seam {
+            let sx = last_seam[cy as usize];
+            (sx - 1).clamp(0, luminance.width) as isize..(sx + 1).clamp(0, luminance.width) as isize
+        } else {
+            0..luminance.width as isize
+        };
+        for cx in x_range {
             let mut gx = 0.0;
             let mut gy = 0.0;
             for dy in -1..=1 {
@@ -319,9 +331,9 @@ fn calculate_seam(dp: &Matrix<f64>) -> Seam {
 struct SeamCarver {
     image: Matrix<Pixel>,
     luminance: Matrix<f64>,
-    luminance_initialized: bool,
     gradient: Matrix<f64>,
     dp: Matrix<f64>,
+    last_seam: Option<Seam>,
 }
 
 impl SeamCarver {
@@ -334,7 +346,6 @@ impl SeamCarver {
                 image.stride,
                 vec![0.0; image.width as usize * image.height as usize],
             ),
-            luminance_initialized: false,
             gradient: Matrix::new(
                 image.width,
                 image.height,
@@ -348,19 +359,21 @@ impl SeamCarver {
                 vec![0.0; image.width as usize * image.height as usize],
             ),
             image,
+            last_seam: None,
         })
     }
 
     fn carve_vertical(&mut self) {
-        if !self.luminance_initialized {
+        if self.last_seam.is_none() {
             calculate_luminance(&mut self.luminance, &self.image);
-            self.luminance_initialized = true
         }
-        calculate_gradient(&mut self.gradient, &self.luminance);
+        calculate_gradient(&mut self.gradient, &self.luminance, self.last_seam.as_ref());
         calculate_dp(&mut self.dp, &self.gradient);
         let seam = calculate_seam(&self.dp);
         self.image.remove_seam(&seam);
         self.luminance.remove_seam(&seam);
+        self.gradient.remove_seam(&seam);
+        self.last_seam = Some(seam);
     }
 
     fn save_image(&self, file_path: &str) -> anyhow::Result<()> {
