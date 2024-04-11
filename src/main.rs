@@ -266,7 +266,7 @@ fn calculate_gradient(
     }
 }
 
-fn calculate_dp(dp: &mut Matrix<f64>, gradient: &Matrix<f64>, last_seam: Option<&Seam>) {
+fn calculate_dp(dp: &mut Matrix<f64>, gradient: &Matrix<f64>) {
     dp.set_storage_size(gradient.width, gradient.height, gradient.stride);
 
     // Start with the initial row as it is
@@ -277,15 +277,7 @@ fn calculate_dp(dp: &mut Matrix<f64>, gradient: &Matrix<f64>, last_seam: Option<
     // Each next energy value is the value itself plus the minimum from the
     // three pixels above it
     for y in 1..gradient.height {
-        // If a seem is provided only update the needed "corridor which changed due
-        // to removing this seam. Otherwise calculate everything.
-        let x_range = if let Some(last_seam) = last_seam {
-            let sx = last_seam[y as usize];
-            (sx - 1).clamp(0, gradient.width) as isize..(sx + 1).clamp(0, gradient.width) as isize
-        } else {
-            0..gradient.width as isize
-        };
-        for cx in x_range {
+        for cx in 0..gradient.width as isize {
             let mut min_energy_on_path = f64::MAX;
             for dx in -1..=1 {
                 let x = cx + dx;
@@ -379,15 +371,11 @@ impl SeamCarver {
             calculate_luminance(&mut self.luminance, &self.image);
         }
         calculate_gradient(&mut self.gradient, &self.luminance, self.last_seam.as_ref());
-        calculate_dp(&mut self.dp, &self.gradient, self.last_seam.as_ref());
-
+        calculate_dp(&mut self.dp, &self.gradient);
         let seam = calculate_seam(&self.dp);
-
         self.image.remove_seam(&seam);
         self.luminance.remove_seam(&seam);
         self.gradient.remove_seam(&seam);
-        self.dp.remove_seam(&seam);
-
         self.last_seam = Some(seam);
     }
 
