@@ -258,7 +258,10 @@ fn calculate_gradient(
                         * luminance.get(y as usize, x as usize);
                 }
             }
-            gradient.set(cy as usize, cx as usize, (gx.powi(2) + gy.powi(2)).sqrt());
+            // sqrt calculation as usually done in sobel operator is not needed
+            // here, as we only need the size relation of the gradient values
+            // between each other
+            gradient.set(cy as usize, cx as usize, gx.powi(2) + gy.powi(2));
         }
     }
 }
