@@ -55,6 +55,13 @@ where
         self.height = height;
         self.stride = stride;
     }
+
+    fn remove_seam(&mut self, seam: &Seam) {
+        for y in 0..self.height {
+            self.remove(y as usize, seam[y as usize] as usize);
+        }
+        self.width = self.width - 1;
+    }
 }
 
 struct StrideIterator<'a, T> {
@@ -106,13 +113,6 @@ impl Matrix<Pixel> {
         image.save(path).context("save image to file")?;
 
         Ok(())
-    }
-
-    fn remove_seam(&mut self, seam: &Seam) {
-        for y in 0..self.height {
-            self.remove(y as usize, seam[y as usize] as usize);
-        }
-        self.width = self.width - 1;
     }
 }
 
@@ -319,6 +319,7 @@ fn calculate_seam(dp: &Matrix<f64>) -> Seam {
 struct SeamCarver {
     image: Matrix<Pixel>,
     luminance: Matrix<f64>,
+    luminance_initialized: bool,
     gradient: Matrix<f64>,
     dp: Matrix<f64>,
 }
@@ -333,6 +334,7 @@ impl SeamCarver {
                 image.stride,
                 vec![0.0; image.width as usize * image.height as usize],
             ),
+            luminance_initialized: false,
             gradient: Matrix::new(
                 image.width,
                 image.height,
@@ -350,11 +352,15 @@ impl SeamCarver {
     }
 
     fn carve_vertical(&mut self) {
-        calculate_luminance(&mut self.luminance, &self.image);
+        if !self.luminance_initialized {
+            calculate_luminance(&mut self.luminance, &self.image);
+            self.luminance_initialized = true
+        }
         calculate_gradient(&mut self.gradient, &self.luminance);
         calculate_dp(&mut self.dp, &self.gradient);
         let seam = calculate_seam(&self.dp);
         self.image.remove_seam(&seam);
+        self.luminance.remove_seam(&seam);
     }
 
     fn save_image(&self, file_path: &str) -> anyhow::Result<()> {
